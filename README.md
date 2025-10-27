@@ -95,7 +95,7 @@ Dentro del archivo hay escenarios para 2 y 6 equipos (3 bots c/u).
 
 ## Autoría y licencia
 
-- **Implementación y juego**: Sebastián Dario Pérez Pantoja ([@tu-usuario](https://github.com/tu-usuario)).
+- **Implementación y juego**: Sebastián Dario Pérez Pantoja ([@sebastiand.perez](https://github.com/sebastiandperez)).
 - © 2025 — Publicado bajo **MIT License** (ver `LICENSE`).
 - La idea general del cifrado de Hill es pública; **HASCILL** (derivación desde ASCII, S-box cúbica, tweak posicional, pipeline A→D y dinámica de juego) es la implementación y diseño de este proyecto.
 
