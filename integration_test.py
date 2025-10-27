@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 # HASCILL — Crypto Race — Implementación de referencia (educativa)
 # Copyright (c) 2025 Sebastián Dario Pérez Pantoja
-# Autor: Sebastián Dario Pérez Pantoja — GitHub: https://github.com/tu-usuario
+# Autor: Sebastián Dario Pérez Pantoja — GitHub: https://github.com/sebastiandperez
 # Licencia: MIT (ver LICENSE) — SPDX-License-Identifier: MIT
 # Si reutilizas, conserva esta línea de atribución.
 #
 # Archivo: integration_test.py
-# Proyecto: HASCILL (antes Hill+)
-# Repo: https://github.com/tu-usuario/hascill
+# Proyecto: HASCILL
+# Repo: https://github.com/sebastiandperez/HASCILL-Crypto-Race
 
 import asyncio, json, struct, socket, random, time
 from typing import Optional, Tuple, List
