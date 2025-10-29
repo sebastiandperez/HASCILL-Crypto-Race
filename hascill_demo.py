@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # HASCILL — Crypto Race — Implementación de referencia (educativa)
-# Copyright (c) 2025 Sebastián Dario Pérez Pantoja
-# Licencia: MIT (ver LICENSE) — SPDX-License-Identifier: MIT
+# © 2025 Sebastián Dario Pérez Pantoja — MIT (ver LICENSE) — SPDX-License-Identifier: MIT
 # Si reutilizas, conserva esta línea de atribución.
 
 """
 hascill_demo.py — Demo interactiva de HASCILL con trazas detalladas.
 
-Funciones principales:
 - encrypt_verbose(password, plaintext, n=2): imprime cada paso del cifrado y retorna lista de bloques cifrados.
 - decrypt_verbose(password, ciphertext_blocks, n=2): imprime cada paso inverso y retorna el texto plano.
 
@@ -33,6 +31,10 @@ def print_mat(name: str, M: List[List[int]]):
     print(f"{name}:")
     for row in M:
         print("   ", "[" + ", ".join(f"{x:>4}" for x in row) + "]")
+
+def format_blocks_for_cli(blocks: List[List[int]]) -> str:
+    """Convierte [[a,b],[c,d],...] -> 'a,b | c,d | ...' para --cipher."""
+    return " | ".join(",".join(str(x) for x in blk) for blk in blocks)
 
 # ========= aritmética modular y matrices =========
 
@@ -121,7 +123,6 @@ def sbox(x: int, m: int) -> int:
     return pow(x, 3, m)
 
 def sbox_inv(y: int, m: int) -> int:
-    # exponente inverso de 3 modulo (m-1) porque Z_m* es de orden (m-1) cuando m es primo
     e = inv_int(3, m - 1)
     return pow(y, e, m)
 
@@ -157,11 +158,9 @@ def expand_bytes(seed: bytes, needed: int) -> bytes:
 def derive_prime_from_password(password_bytes: bytes) -> int:
     S = sum(password_bytes)
     seed = 257 + (S % 1000)
-    # requerimos m primo y (m-1) no múltiplo de 3 → sbox cúbica invertible
     return next_prime_condition(seed, cond=lambda p: ((p - 1) % 3 != 0 and p >= 257))
 
 def derive_params(password_bytes: bytes, n: int, m: int, max_attempts: int = 16) -> Tuple[List[List[int]], List[int], List[int]]:
-    """Genera M (invertible), b e IV a partir de la contraseña."""
     needed = n*n + n + n
     attempt = 0
     while attempt < max_attempts:
@@ -191,7 +190,6 @@ def list_to_ascii(v: List[int]) -> str:
     try:
         return bytes(v).decode("ascii", errors="strict")
     except Exception:
-        # en demo mostramos incluso si no es ASCII puro
         return bytes(v).decode("ascii", errors="ignore")
 
 def blocks_of(v: List[int], n: int) -> List[List[int]]:
@@ -262,7 +260,10 @@ def encrypt_verbose(password: str, plaintext: str, n: int = 2) -> List[List[int]
         ciphertext_blocks.append(c)
         prev = c[:]  # encadenamiento tipo CBC
 
-    print("[OUT] Ciphertext por bloques:", ciphertext_blocks)
+    cli_str = format_blocks_for_cli(ciphertext_blocks)
+    print("[OUT] Cipher por bloques:", ciphertext_blocks)
+    print(f'[OUT] Cipher (CLI):  {cli_str}')
+    print("      Usa:  --mode dec --password TU_PASS --cipher", f'"{cli_str}"')
     hrule()
     return ciphertext_blocks
 
@@ -362,7 +363,6 @@ def main():
             print("Faltan --password y --cipher para descifrar.")
             return
         cblocks = parse_cipher_blocks(args.cipher)
-        # validación rápida de aridad:
         for b in cblocks:
             if len(b) != args.n:
                 raise ValueError(f"Cada bloque debe tener n={args.n} enteros. Recibido: {b}")
