@@ -13,7 +13,7 @@
 import asyncio, json, struct, socket, random, time
 from typing import Optional, Tuple, List
 
-from hillplus_async_server import run_server
+from hascill_async_server import run_server
 
 PASSWORD = "PAZ9"
 MESSAGE  = "Hils"
