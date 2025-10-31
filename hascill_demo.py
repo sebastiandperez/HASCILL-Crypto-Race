@@ -5,18 +5,16 @@
 # Si reutilizas, conserva esta línea de atribución.
 
 """
-hascill_demo.py — Demo interactiva de HASCILL con trazas detalladas.
-
-- encrypt_verbose(password, plaintext, n=2): imprime cada paso del cifrado y retorna lista de bloques cifrados.
-- decrypt_verbose(password, ciphertext_blocks, n=2): imprime cada paso inverso y retorna el texto plano.
-
-NUEVO:
-- Salida adicional en Base64: 'ciphertext ASCII' compacto con --cipher-b64 (usa 2 bytes por entero, big-endian).
+hascill_demo.py — Demo interactiva de HASCILL (SPN) con n=4 y 10 rondas por defecto.
+- Cifrado/descifrado con trazas paso a paso.
+- Deriva todo desde la contraseña ASCII:
+  m primo, subclaves por ronda (M_r, b_r), IV único y tweaks por bloque/ronda.
+- Salidas: bloques, formato CLI y Base64 compacto (2 bytes por entero).
 
 Ejemplos:
     python3 hascill_demo.py --mode enc --password PAZ9 --message Hils
-    python3 hascill_demo.py --mode dec --password PAZ9 --cipher "417,369 | 101,55"
-    python3 hascill_demo.py --mode dec --password PAZ9 --cipher-b64 "AA8xAH..." --n 2
+    python3 hascill_demo.py --mode dec --password PAZ9 --cipher "...,..." --n 4 --rounds 10
+    python3 hascill_demo.py --mode dec --password PAZ9 --cipher-b64 "AAAA..." --n 4 --rounds 10
 """
 
 import argparse, base64
@@ -24,19 +22,19 @@ from typing import List, Tuple
 
 # ========= utilidades de impresión =========
 
-def hrule(ch="=", n=60):
+def hrule(ch="=", n=70):
     print(ch * n)
 
 def print_vec(name: str, v: List[int]):
-    print(f"{name}: [{', '.join(str(x) for x in v)}]")
+    print(f"{name}: [" + ", ".join(str(x) for x in v) + "]")
 
 def print_mat(name: str, M: List[List[int]]):
     print(f"{name}:")
     for row in M:
-        print("   ", "[" + ", ".join(f"{x:>4}" for x in row) + "]")
+        print("   [" + ", ".join(f"{x:>5}" for x in row) + "]")
 
 def format_blocks_for_cli(blocks: List[List[int]]) -> str:
-    """[[a,b],[c,d],...] -> 'a,b | c,d | ...'"""
+    """[[a,b,...],[...],...] -> 'a,b,... | ... | ...'"""
     return " | ".join(",".join(str(x) for x in blk) for blk in blocks)
 
 # ========= aritmética modular y matrices =========
@@ -115,7 +113,7 @@ def sbox(x: int, m: int) -> int:
     return pow(x, 3, m)
 
 def sbox_inv(y: int, m: int) -> int:
-    e = inv_int(3, m - 1)
+    e = inv_int(3, m - 1)   # inversa de 3 modulo (m-1)
     return pow(y, e, m)
 
 def pkcs7_pad(data: List[int], block_size: int) -> List[int]:
@@ -133,23 +131,26 @@ def pkcs7_unpad(data: List[int]) -> List[int]:
 # ========= Derivación desde contraseña =========
 
 def expand_bytes(seed: bytes, needed: int) -> bytes:
-    """Expansor simple (didáctico). Para producción usar KDFs robustas."""
+    """Expansor didáctico (NO criptográfico)."""
     out = bytearray(); i = 0
+    L = len(seed)
     while len(out) < needed:
-        b = seed[i % len(seed)]
+        b = seed[i % L]
         mix = ((i * 31) ^ (b << 3)) & 0xFF
-        out.append(b ^ mix); i += 1
+        out.append(b ^ mix)
+        i += 1
     return bytes(out[:needed])
 
 def derive_prime_from_password(password_bytes: bytes) -> int:
     S = sum(password_bytes)
     seed = 257 + (S % 1000)
+    # Necesitamos gcd(3, m-1)=1 para que x^3 mod m sea bijectiva
     return next_prime_condition(seed, cond=lambda p: ((p - 1) % 3 != 0 and p >= 257))
 
-def derive_params(password_bytes: bytes, n: int, m: int, max_attempts: int = 16) -> Tuple[List[List[int]], List[int], List[int]]:
+def derive_params(password_bytes: bytes, n: int, m: int, max_attempts: int = 16):
+    """Devuelve una M invertible, b, IV (compat r=1)."""
     needed = n*n + n + n
-    attempt = 0
-    while attempt < max_attempts:
+    for attempt in range(max_attempts):
         material = expand_bytes(password_bytes + bytes([attempt]), needed)
         it = iter(material)
         M = [[next(it) % m for _ in range(n)] for __ in range(n)]
@@ -157,13 +158,32 @@ def derive_params(password_bytes: bytes, n: int, m: int, max_attempts: int = 16)
         IV = [next(it) % m for _ in range(n)]
         if det_mod(M, m) % m != 0:
             return M, b, IV
-        attempt += 1
     raise ValueError("No fue posible derivar M invertible")
 
-def compute_tweak(i: int, n: int, m: int, key_sum: int) -> List[int]:
-    return [(key_sum + (i + 1) * (j + 1)) % m for j in range(n)]
+def compute_tweak(i: int, n: int, m: int, key_sum: int, r: int | None = None) -> List[int]:
+    """Tweak por bloque i y (opcional) por ronda r."""
+    return [ (key_sum + (i+1)*(j+1) + (0 if r is None else r)) % m for j in range(n) ]
 
-# ========= Helpers ASCII / empaquetado =========
+def derive_round_params(password_bytes: bytes, n: int, m: int, rounds: int, max_attempts: int = 16):
+    """Deriva subclaves por ronda: (M_r, b_r) para r=1..rounds y un IV único."""
+    M1, b1, IV = derive_params(password_bytes, n, m, max_attempts=max_attempts)
+    Ms = [M1]; bs = [b1]
+    for r in range(2, rounds+1):
+        needed = n*n + n
+        for attempt in range(max_attempts):
+            # Separación de dominio simple: etiqueta de ronda
+            material = expand_bytes(password_bytes + b"|R|" + bytes([r, attempt & 0xFF]), needed)
+            it = iter(material)
+            M = [[next(it) % m for _ in range(n)] for __ in range(n)]
+            b = [next(it) % m for _ in range(n)]
+            if det_mod(M, m) % m != 0:
+                Ms.append(M); bs.append(b)
+                break
+        else:
+            raise ValueError(f"No fue posible derivar M_{r} invertible")
+    return Ms, bs, IV
+
+# ========= Helpers ASCII / bloques / Base64 =========
 
 def ascii_list(s: str) -> List[int]:
     try:
@@ -181,32 +201,26 @@ def list_to_ascii(v: List[int]) -> str:
 def blocks_of(v: List[int], n: int) -> List[List[int]]:
     return [v[i:i+n] for i in range(0, len(v), n)]
 
-# ========= Serialización Base64 (ASCII seguro) =========
-
 def blocks_to_bytes(blocks: List[List[int]]) -> bytes:
-    """Serializa [[a,b],[c,d],...] como bytes usando 2 bytes por entero (big-endian)."""
+    """Serializa cada entero en 2 bytes big-endian (suficiente para m < 65536)."""
     out = bytearray()
     for blk in blocks:
         for x in blk:
             if x < 0 or x > 0xFFFF:
-                raise ValueError("Valor fuera de rango para serialización de 2 bytes.")
+                raise ValueError("Valor fuera de rango para 2 bytes.")
             out.append((x >> 8) & 0xFF)
             out.append(x & 0xFF)
     return bytes(out)
 
 def bytes_to_blocks(data: bytes, n: int) -> List[List[int]]:
-    """Deserializa bytes (2 bytes por entero) a [[...],[...]] con aridad n."""
     if len(data) % 2 != 0:
-        raise ValueError("Bytes inválidos: longitud impar.")
+        raise ValueError("Bytes inválidos (longitud impar).")
     vals = []
     for i in range(0, len(data), 2):
         vals.append((data[i] << 8) | data[i+1])
     if len(vals) % n != 0:
-        raise ValueError(f"Número de enteros {len(vals)} no múltiplo de n={n}.")
-    blocks = []
-    for i in range(0, len(vals), n):
-        blocks.append(vals[i:i+n])
-    return blocks
+        raise ValueError(f"N° de enteros {len(vals)} no múltiplo de n={n}.")
+    return [vals[i:i+n] for i in range(0, len(vals), n)]
 
 def blocks_to_b64(blocks: List[List[int]]) -> str:
     return base64.b64encode(blocks_to_bytes(blocks)).decode("ascii")
@@ -215,88 +229,93 @@ def b64_to_blocks(b64: str, n: int) -> List[List[int]]:
     data = base64.b64decode(b64.encode("ascii"))
     return bytes_to_blocks(data, n)
 
-# ========= Cifrado / Descifrado con trazas =========
+# ========= Derivación “todo en uno” =========
 
-def derive_all_from_password(password: str, n: int):
+def derive_all_from_password(password: str, n: int, rounds: int):
     P = ascii_list(password)
     m = derive_prime_from_password(bytes(P))
     key_sum = sum(P) % m
-    M, b, IV = derive_params(bytes(P), n, m)
-    return P, m, key_sum, M, b, IV
+    Ms, bs, IV = derive_round_params(bytes(P), n, m, rounds=rounds)
+    return P, m, key_sum, Ms, bs, IV
 
-def encrypt_verbose(password: str, plaintext: str, n: int = 2) -> List[List[int]]:
+# ========= Cifrado / Descifrado con trazas (rondas) =========
+
+def encrypt_verbose(password: str, plaintext: str, n: int = 4, rounds: int = 10) -> List[List[int]]:
     hrule()
-    print("CIFRADO HASCILL — trazas")
+    print(f"CIFRADO HASCILL — n={n}, rounds={rounds}")
     hrule("-")
 
-    P, m, key_sum, M, b, IV = derive_all_from_password(password, n)
+    P, m, key_sum, Ms, bs, IV = derive_all_from_password(password, n, rounds)
 
-    print(f"[1] Contraseña: {password!r} → ASCII:", ascii_list(password))
-    print(f"[1] Mensaje    : {plaintext!r} → ASCII:", ascii_list(plaintext))
-    print(f"[2] Primo m derivado: {m}  (garantiza S-box cúbica invertible)")
-    print_mat("[3] Matriz M (mod m)", M)
-    print_vec("[3] b", b)
+    print(f"[1] Contraseña: {password!r} → ASCII: {ascii_list(password)}")
+    print(f"[2] Primo m derivado: {m} (gcd(3,m-1)=1 para S-box cúbica)")
+    for r, Mr in enumerate(Ms, 1):
+        print_mat(f"[3] M_{r} (mod m)", Mr)
+        print_vec(f"[3] b_{r}", bs[r-1])
     print_vec("[3] IV", IV)
     print(f"[4] key_sum = sum(P) mod m = {key_sum}")
     hrule("-")
 
-    v = ascii_list(plaintext)
-    v_pad = pkcs7_pad(v, n)
-    print_vec("[5] Plaintext ASCII", v)
+    v_ascii = ascii_list(plaintext)
+    v_pad = pkcs7_pad(v_ascii, n)
+    print_vec("[5] Plaintext ASCII", v_ascii)
     print_vec("[5] + PKCS#7", v_pad)
     v_blocks = blocks_of(v_pad, n)
-    print(f"[5] Bloques n={n}: {len(v_blocks)} →", v_blocks)
+    print(f"[5] Bloques n={n}: {len(v_blocks)} → {v_blocks}")
     hrule("-")
 
     prev = IV[:]
     ciphertext_blocks: List[List[int]] = []
     for i, blk in enumerate(v_blocks):
         print(f"[BLOQUE {i}]")
-        t_i = compute_tweak(i, n, m, key_sum)
-        print_vec("  tweak t_i", t_i)
-        print_vec("  prev     ", prev)
-        print_vec("  v_i      ", blk)
+        t0 = compute_tweak(i, n, m, key_sum, r=None)
+        print_vec("  tweak t0", t0)
+        print_vec("  prev    ", prev)
+        print_vec("  v_i     ", blk)
 
-        u = [(blk[j] + prev[j] + t_i[j]) % m for j in range(n)]
-        print_vec("  A) u = v+prev+t", u)
+        # Pre-whitening
+        x = [(blk[j] + prev[j] + t0[j]) % m for j in range(n)]
+        print_vec("  A0) x = v+prev+t0", x)
 
-        u_prime = [sbox(x, m) for x in u]
-        print_vec("  B) u' = S(u)", u_prime)
+        # Rondas r=1..R
+        for r in range(1, rounds+1):
+            tr = t0 if rounds == 1 else compute_tweak(i, n, m, key_sum, r=r)
+            x = [sbox(xx, m) for xx in x]                      # B_r
+            print_vec(f"  B{r}) S(x)", x)
+            x = mat_vec_mul(Ms[r-1], x, m)                     # C_r
+            print_vec(f"  C{r}) M_{r}·x", x)
+            x = [(x[j] + bs[r-1][j] + tr[j]) % m for j in range(n)]  # D_r
+            print_vec(f"  D{r}) x = x+b_{r}+t_{r}", x)
 
-        w = mat_vec_mul(M, u_prime, m)
-        print_vec("  C) w = M·u'", w)
-
-        c = [(w[j] + b[j] + t_i[j]) % m for j in range(n)]
-        print_vec("  D) c = w+b+t", c)
+        c = x
+        print_vec("  OUT) c", c)
         hrule(".")
-
         ciphertext_blocks.append(c)
         prev = c[:]
 
     cli_str = format_blocks_for_cli(ciphertext_blocks)
     b64_str = blocks_to_b64(ciphertext_blocks)
-
     print("[OUT] Cipher por bloques:", ciphertext_blocks)
     print(f'[OUT] Cipher (CLI):   {cli_str}')
     print(f'[OUT] Cipher (B64):   {b64_str}')
-    print("      Usa:  --mode dec --password TU_PASS --cipher", f'"{cli_str}"')
-    print("         o: --mode dec --password TU_PASS --cipher-b64", f'"{b64_str}"', f"--n {n}")
+    print("      Descifrar con los mismos --n y --rounds.")
     hrule()
     return ciphertext_blocks
 
-def decrypt_verbose(password: str, ciphertext_blocks: List[List[int]], n: int = 2) -> str:
+def decrypt_verbose(password: str, ciphertext_blocks: List[List[int]], n: int = 4, rounds: int = 10) -> str:
     hrule()
-    print("DESCIFRADO HASCILL — trazas")
+    print(f"DESCIFRADO HASCILL — n={n}, rounds={rounds}")
     hrule("-")
 
-    P, m, key_sum, M, b, IV = derive_all_from_password(password, n)
-    Minv = mat_inverse_mod(M, m)
+    P, m, key_sum, Ms, bs, IV = derive_all_from_password(password, n, rounds)
+    Minvs = [mat_inverse_mod(Mr, m) for Mr in Ms]
 
-    print(f"[1] Contraseña: {password!r} → ASCII:", ascii_list(password))
+    print(f"[1] Contraseña: {password!r} → ASCII: {ascii_list(password)}")
     print(f"[2] Primo m derivado: {m}")
-    print_mat("[3] M", M)
-    print_mat("[3] M^{-1}", Minv)
-    print_vec("[3] b", b)
+    for r, (Mr, Mrinv) in enumerate(zip(Ms, Minvs), 1):
+        print_mat(f"[3] M_{r}", Mr)
+        print_mat(f"[3] M_{r}^(-1)", Mrinv)
+        print_vec(f"[3] b_{r}", bs[r-1])
     print_vec("[3] IV", IV)
     print(f"[4] key_sum = {key_sum}")
     hrule("-")
@@ -305,24 +324,26 @@ def decrypt_verbose(password: str, ciphertext_blocks: List[List[int]], n: int = 
     recovered: List[int] = []
     for i, c in enumerate(ciphertext_blocks):
         print(f"[BLOQUE {i} — inverso]")
-        t_i = compute_tweak(i, n, m, key_sum)
-        print_vec("  tweak t_i", t_i)
-        print_vec("  prev     ", prev)
-        print_vec("  c_i      ", c)
+        t0 = compute_tweak(i, n, m, key_sum, r=None)
+        print_vec("  tweak t0", t0)
+        print_vec("  prev    ", prev)
+        print_vec("  c_i     ", c)
 
-        w = [(c[j] - b[j] - t_i[j]) % m for j in range(n)]
-        print_vec("  D⁻¹) w = c - b - t", w)
+        x = c[:]
+        # Rondas inversas R..1
+        for r in range(rounds, 0, -1):
+            tr = t0 if rounds == 1 else compute_tweak(i, n, m, key_sum, r=r)
+            x = [(x[j] - bs[r-1][j] - tr[j]) % m for j in range(n)]   # D_r^{-1}
+            print_vec(f"  D{r}⁻¹) x = x - b_{r} - t_{r}", x)
+            x = mat_vec_mul(Minvs[r-1], x, m)                         # C_r^{-1}
+            print_vec(f"  C{r}⁻¹) x = M_{r}^(-1)·x", x)
+            x = [sbox_inv(xx, m) for xx in x]                         # B_r^{-1}
+            print_vec(f"  B{r}⁻¹) x = S^{-1}(x)", x)
 
-        u_prime = mat_vec_mul(Minv, w, m)
-        print_vec("  C⁻¹) u' = M^{-1}·w", u_prime)
-
-        u = [sbox_inv(y, m) for y in u_prime]
-        print_vec("  B⁻¹) u = S^{-1}(u')", u)
-
-        v = [(u[j] - prev[j] - t_i[j]) % m for j in range(n)]
-        print_vec("  A⁻¹) v = u - prev - t", v)
+        # Deshacer pre-whitening
+        v = [(x[j] - prev[j] - t0[j]) % m for j in range(n)]
+        print_vec("  A0⁻¹) v = x - prev - t0", v)
         hrule(".")
-
         recovered.extend(v)
         prev = c[:]
 
@@ -337,12 +358,10 @@ def decrypt_verbose(password: str, ciphertext_blocks: List[List[int]], n: int = 
 # ========= CLI =========
 
 def parse_cipher_blocks(s: str) -> List[List[int]]:
-    """Parses 'a,b | c,d | ...' → [[a,b],[c,d],...]"""
     parts = [p.strip() for p in s.split("|")]
     blocks = []
     for p in parts:
-        if not p:
-            continue
+        if not p: continue
         nums = [int(x.strip()) for x in p.split(",") if x.strip()]
         blocks.append(nums)
     return blocks
@@ -352,57 +371,53 @@ def main():
     ap.add_argument("--mode", choices=["enc", "dec"], help="enc (cifrar) o dec (descifrar)")
     ap.add_argument("--password", help="Contraseña ASCII")
     ap.add_argument("--message", help="Mensaje ASCII (para --mode enc)")
-    ap.add_argument("--cipher", help="Ciphertext en bloques: \"a,b | c,d | ...\" (para --mode dec)")
+    ap.add_argument("--cipher", help="Ciphertext en bloques: \"a,b,c,d | ...\" (para --mode dec)")
     ap.add_argument("--cipher-b64", help="Ciphertext Base64 compacto (para --mode dec)")
-    ap.add_argument("--n", type=int, default=2, help="Tamaño de bloque (por defecto 2)")
+    ap.add_argument("--n", type=int, default=4, help="Tamaño de bloque (default 4)")
+    ap.add_argument("--rounds", type=int, default=10, help="Número de rondas (default 10)")
     args = ap.parse_args()
 
     if args.mode == "enc":
         if not (args.password and args.message):
-            print("Faltan --password y --message para cifrar.")
-            return
-        encrypt_verbose(args.password, args.message, n=args.n)
+            print("Faltan --password y --message para cifrar."); return
+        encrypt_verbose(args.password, args.message, n=args.n, rounds=args.rounds)
 
     elif args.mode == "dec":
         if not args.password:
-            print("Falta --password.")
-            return
+            print("Falta --password."); return
         if args.cipher_b64:
             blocks = b64_to_blocks(args.cipher_b64, n=args.n)
         elif args.cipher:
             blocks = parse_cipher_blocks(args.cipher)
         else:
-            print("Debes pasar --cipher o --cipher-b64.")
-            return
-        # validar aridad n
+            print("Debes pasar --cipher o --cipher-b64."); return
         for b in blocks:
             if len(b) != args.n:
                 raise ValueError(f"Cada bloque debe tener n={args.n} enteros. Recibido: {b}")
-        decrypt_verbose(args.password, blocks, n=args.n)
+        decrypt_verbose(args.password, blocks, n=args.n, rounds=args.rounds)
 
     else:
-        # modo interactivo
+        # Modo interactivo rápido
         print("== HASCILL Demo (interactivo) ==")
         mode = input("Modo [enc/dec]: ").strip().lower()
         n = args.n
-        if mode not in ("enc", "dec"):
-            print("Modo inválido."); return
+        R = args.rounds
         password = input("Contraseña ASCII: ").strip()
         if mode == "enc":
             message = input("Mensaje ASCII: ").strip()
-            encrypt_verbose(password, message, n=n)
+            encrypt_verbose(password, message, n=n, rounds=R)
         else:
             kind = input("¿Cipher en [cli/b64]? ").strip().lower()
             if kind == "b64":
                 b64 = input("Cipher (Base64): ").strip()
                 blocks = b64_to_blocks(b64, n=n)
             else:
-                s = input('Cipher (ej: "417,369 | 101,55"): ').strip()
+                s = input('Cipher (ej: "1,2,3,4 | 5,6,7,8"): ').strip()
                 blocks = parse_cipher_blocks(s)
             for b in blocks:
                 if len(b) != n:
                     raise ValueError(f"Cada bloque debe tener n={n} enteros. Recibido: {b}")
-            decrypt_verbose(password, blocks, n=n)
+            decrypt_verbose(password, blocks, n=n, rounds=R)
 
 if __name__ == "__main__":
     main()

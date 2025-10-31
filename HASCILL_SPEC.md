@@ -10,9 +10,12 @@
 
 **HASCILL** es un cifrado **simétrico por bloques** inspirado en el cifrado de Hill clásico, diseñado con fines **educativos** y de **visualización paso a paso**. No pretende reemplazar cifrados modernos (AES/ChaCha20), pero sí mostrar de forma manipulable:
 
-* Derivación de parámetros a partir de la **contraseña (ASCII)**.
-* Un **modo por rondas** con: *pre-suma con vector previo*, *S‑box no lineal*, *transformación lineal matricial*, *offset final con bias y tweak*.
-* Un **tweak** dependiente de la posición para evitar repeticiones triviales entre bloques.
+- Derivación de parámetros a partir de la **contraseña (ASCII)**.
+- Un **modo por rondas**: *pre-suma con vector previo (pre-whitening)*, *S-box no lineal*, *transformación lineal matricial*, *offset con bias y tweak*, repetidos **R** veces.
+- Un **tweak** dependiente de la posición (y de la ronda) para evitar repeticiones triviales entre bloques.
+
+> **Configuración base del proyecto:** **tamaño de bloque n = 4** y **número de rondas R = 10**.
+> (Se puede ajustar para fines didácticos; la demo y el juego soportan otros valores, aún así, este cifrado fue planteado para ejecutarse bajo esos parametros.)
 
 > **Nota de seguridad:** HASCILL es una construcción didáctica. Para sistemas reales deben emplearse KDFs y cifrados probados. Ver §12.
 
@@ -20,165 +23,148 @@
 
 ## 2) Notación
 
-* ( n ): tamaño del bloque en enteros (en el juego, ( n=2 )).
-* ( m ): módulo primo del anillo ( \mathbb{Z}_m ).
-* ( M \in \mathbb{Z}_m^{n\times n} ): matriz clave invertible módulo ( m ).
-* ( b, IV, t_i \in \mathbb{Z}_m^n ): vectores bias, inicialización y tweak del bloque ( i ).
-* ( v_i ): vector del bloque de texto plano ( i ) (tras padding y empaquetado).
-* Operaciones "+", "*" y potencias se entienden **mod ( m )** y por componente cuando aplica.
+- **n**: tamaño del bloque en enteros y dimensión de la matriz (configuración base **n = 4**).
+- **R**: número de rondas del cifrado (configuración base **R = 10**).
+- **m**: módulo primo del anillo \( \mathbb{Z}_m \).
+- \( M_r \in \mathbb{Z}_m^{n\times n} \): matriz de la **ronda r** (invertible módulo \(m\)).
+- \( b_r, IV, t_{i,r} \in \mathbb{Z}_m^n \): bias por ronda \(b_r\), vector de inicialización \(IV\) y tweak del bloque \(i\) en la ronda \(r\).
+- \( v_i \): bloque de texto plano (tras padding).
+- Todas las operaciones son **mod \(m\)**; S-box y sumas por componente.
 
 ---
 
 ## 3) Derivación de parámetros desde la contraseña
 
-Se parte de una contraseña ASCII (4 caracteres en el juego). Sea ( P ) la secuencia de bytes.
+Se parte de una contraseña ASCII. Sea \( P \) la secuencia de bytes.
 
-1. **Módulo primo ( m )**
+1. **Módulo primo \(m\)**
+   Semilla \( S = \sum P \). Elegir el **primer primo \(m \ge 257\)** tal que \( (m-1) \not\equiv 0 \ (\bmod\ 3) \).
+   Motivo: asegurar \( \gcd(3, m-1)=1 \) para que la S-box cúbica sea invertible.
 
-   * Semilla: ( S = \sum P ).
-   * Candidato: ( m \ge 257 ) y ( m \equiv̸ 1 \pmod{3} ).
-   * Elegir el **primer primo** ( m\ge 257 ) que cumpla lo anterior.
-   * Motivo: asegurar ( \gcd(3, m-1) = 1 ) para que la S‑box cúbica sea invertible (ver §5).
+2. **Material pseudoaleatorio didáctico**
+   Se expande \(P\) con un expansor simple (*expand_bytes*) para obtener bytes suficientes.
 
-2. **Material de clave pseudoaleatorio**
-
-   * Se expande ( P ) a un buffer de ( n^2 + n + n ) bytes mediante una función simple (*expand_bytes*, didáctica).
-
-3. **Extracción de parámetros**
-
-   * ( M \leftarrow n\times n ) bytes (reducidos mod ( m )).
-   * ( b \leftarrow n ) bytes.
-   * ( IV \leftarrow n ) bytes.
-   * Si ( \det(M) \equiv 0\ (\text{mod } m) ), reintentar con un contador de intento anexo a ( P ) (hasta 16 veces).
+3. **Subclaves por ronda**
+   - Para **r = 1..R** se derivan \( M_r \) (invertible mod \(m\)) y \( b_r \) con **separación de dominio por ronda** (etiqueta de ronda en el expansor).
+   - Se deriva un **IV** único para todo el mensaje. Si \( \det(M_r) \equiv 0 \), se reintenta (hasta 16).
 
 4. **Suma de clave**
-
-   * ( \text{key_sum} = (\sum P) \bmod m ).
+   \( \text{key\_sum} = (\sum P) \bmod m \).
 
 ---
 
 ## 4) Empaquetado y padding del mensaje
 
-* Convertir el plaintext ASCII en **lista de enteros** (códigos).
-* Aplicar **PKCS#7** sobre enteros para que la longitud sea múltiplo de ( n ).
-* Particionar en bloques ( v_0, v_1, \dots \in \mathbb{Z}_m^n ).
+- Convertir el plaintext ASCII en **lista de enteros** (códigos).
+- Aplicar **PKCS#7** para que la longitud sea múltiplo de \( n \).
+- Particionar en bloques \( v_0, v_1, \dots \in \mathbb{Z}_m^n \).
 
 ---
 
 ## 5) Componentes de ronda
 
-1. **Tweak por bloque**
-   [ t_i[j] = (\text{key_sum} + (i+1)(j+1)) \bmod m, \quad j=0..n-1 ]
-   Evita repetición trivial entre bloques y ata cada bloque a su **posición**.
+1. **Tweak por bloque y ronda**
+   \( t_{i,r}[j] = \big(\text{key\_sum} + (i+1)(j+1) + r\big) \bmod m,\ \ j=0..n-1 \).
+   (Para compatibilidad 1 ronda puede usarse \(t_{i,0}\) en el pre-whitening.)
 
-2. **S‑box cúbica**
-   [ S(x) = x^3 \bmod m ]
-   Es **permutación** sobre ( \mathbb{Z}_m ) cuando ( \gcd(3, m-1)=1 ) (que garantizamos al elegir ( m )).
-   Su inversa es ( S^{-1}(y) = y^{e} \bmod m ), con ( e \equiv 3^{-1} \pmod{m-1} ).
-
----
-
-## 6) Cifrado por bloque (A→B→C→D)
-
-Para el bloque ( i ):
-
-* **A (pre‑suma)**: ( u = v_i + \text{prev} + t_i ).
-
-  * Donde **prev** es ( IV ) si ( i=0 ) o el **cifrado del bloque anterior** ( c_{i-1} ).
-  * Analógico a un CBC con tweak.
-
-* **B (no linealidad)**: ( u' = S(u) ) (por componente).
-
-* **C (mezcla lineal)**: ( w = M,u' ).
-
-* **D (offset final)**: ( c_i = w + b + t_i ).
-
-El ciphertext es la concatenación de ( c_0, c_1, \dots ).
+2. **S-box cúbica**
+   \( S(x) = x^3 \bmod m \), permutación sobre \( \mathbb{Z}_m \) con \( \gcd(3, m-1)=1 \).
+   Inversa: \( S^{-1}(y) = y^e \bmod m \), con \( e \equiv 3^{-1} \ (\bmod\ m-1) \).
 
 ---
 
-## 7) Descifrado por bloque (inversas)
+## 6) Cifrado por bloque (pre-whitening + **R** rondas)
 
-Con los mismos ( m, M, b, IV ) y ( t_i ):
+Para el bloque \( i \) (con **prev** = \(IV\) si \(i=0\) o \(c_{i-1}\) si \(i>0\)):
 
-* **D⁻¹**: ( w = c_i - b - t_i ).
-* **C⁻¹**: ( u' = M^{-1} w ) (existe por construcción).
-* **B⁻¹**: ( u = S^{-1}(u') ) con exponente ( e = 3^{-1} \bmod (m-1) ).
-* **A⁻¹**: ( v_i = u - \text{prev} - t_i ).
-  Actualizar **prev** (\leftarrow c_i) y continuar.
-* Al final, quitar **PKCS#7**.
+1) **Pre-whitening (A0)**
+\( x_0 = v_i + \text{prev} + t_{i,0} \)  — usa tweak base del bloque; depende de \(i\), no de \(r\).
 
-> **Garantía de invertibilidad**: (i) se impone ( \det(M) \not\equiv 0 ), (ii) la S‑box es permutación al garantizar ( \gcd(3, m-1)=1 ).
+2) **Rondas \( r = 1..R \)**
+Para cada \(r\):
+- **B\(_r\)** (no linealidad): \( x \leftarrow S(x) \)
+- **C\(_r\)** (mezcla lineal): \( x \leftarrow M_r \cdot x \)
+- **D\(_r\)** (offset): \( x \leftarrow x + b_r + t_{i,r} \)
+
+3) **Salida**
+\( c_i = x \). Actualizar **prev = c_i** (encadenamiento tipo CBC con tweak).
+
+> La configuración base aplica **R = 10** rondas.
+
+---
+
+## 7) Descifrado por bloque (inversas en orden inverso)
+
+Con los mismos \( m, M_r, b_r, IV \) y \( t_{i,r} \):
+
+1) \( x \leftarrow c_i \)
+2) Para \( r = R..1 \):
+   - **D\(_r^{-1}\)**: \( x \leftarrow x - b_r - t_{i,r} \)
+   - **C\(_r^{-1}\)**: \( x \leftarrow M_r^{-1} \cdot x \)
+   - **B\(_r^{-1}\)**: \( x \leftarrow S^{-1}(x) \)
+3) **A0\(^{-1}\)**: \( v_i = x - \text{prev} - t_{i,0} \)
+   Actualizar **prev = c_i**.
+4) Quitar **PKCS#7** al final.
+
+> **Invertibilidad garantizada:** (i) \( \det(M_r)\not\equiv 0 \), (ii) S-box es permutación, (iii) sumas modulares son reversibles.
 
 ---
 
 ## 8) Qué aporta respecto a Hill clásico
 
-* Hill clásico es **lineal**: ( c = M v ).
-* HASCILL añade **no linealidad (S‑box)**, **estado encadenado** (tipo CBC) y **tweak por bloque**.
-* La derivación **automática desde la contraseña ASCII** fija ( m, M, b, IV, t_i ) de forma reproducible.
+- Hill clásico: **lineal** \( c = M v \) (y, en variantes, \( c = M v + b \)).
+- HASCILL (base **n=4, R=10**): añade **no linealidad** (S-box), **encadenamiento** por bloque, **tweak por bloque y ronda**, **múltiples rondas** con subclaves distintas, y **pre-whitening**.
+- Deriva **m, \(M_r\), \(b_r\), \(IV\), \(t_{i,r}\)** **desde la contraseña ASCII** de forma reproducible.
 
 ---
 
-## 9) Ejemplo didáctico (n=2)
+## 9) Ejemplo didáctico
 
-Supongamos ( \text{password} = ) "PAZ9" y ( \text{message} = ) "Hils".
-
-1. ASCII:
-
-   * PWD → [80, 65, 90, 57]; MSG → [72, 105, 108, 115].
-2. Derivación → se obtiene un primo ( m ), matriz ( M ), vectores ( b, IV ) y ( t_0, t_1, \dots ).
-3. Partición (n=2) → bloques ( v_0=[72,105], v_1=[108,115] ).
-4. Bloque 0:
-
-   * ( u = v_0 + IV + t_0 ) → ( u' = S(u) ) → ( w = M u' ) → ( c_0 = w + b + t_0 ).
-5. Bloque 1: usar **prev = c_0** y repetir.
-6. Output = ( c_0 || c_1 ).
-
-En el juego, cada paso se calcula manualmente (o por equipo/turnos) para entender **cómo cambian los vectores**.
+Para exposición manual en clase puede usarse **n=2** y **R=1–3** (más corto de calcular a mano).
+Para la **demo base** del proyecto se usa **n=4** y **R=10** (mayor difusión y dificultad).
 
 ---
 
 ## 10) Complejidad y cálculo a mano
 
-* Con ( n=2 ) los cálculos son de tamaño manejable: sumas, productos y potencias modulares por componente.
-* La S‑box ( x^3 \bmod m ) se computa rápido incluso a mano para valores pequeños; la inversa usa el exponente ( e=3^{-1}\bmod(m-1) ) (que puede precomputarse).
-* La multiplicación ( M u' ) (2×2) requiere 4 productos y 2 sumas modulares.
+- Con **n=4, R=10** hay 1 pre-suma + \(3R\) pasos por bloque (S-box, mezcla, offset).
+- Para práctica manual, reducir a **n=2** y **R=1–3** resulta manejable; la S-box \(x^3 \bmod m\) y su inversa son rápidas con exponentiación modular.
 
 ---
 
 ## 11) Errores frecuentes (y cómo detectarlos)
 
-* **Longitud del vector**: TPW/TMSG esperan 4 enteros; A..D esperan ( n ).
-* **Órdenes de fase**: D no puede ejecutarse sin C, etc.
-* **Rango**: todos los valores deben estar en ( 0..m-1 ).
-* **Padding**: recordar quitarlo al descifrar.
+- **Longitud del bloque**: Asegurar vectores de tamaño \(n\).
+- **Orden de fases**: invertir exactamente en orden inverso.
+- **Rangos**: todos los valores en \(0..m-1\).
+- **Padding**: usar y retirar **PKCS#7** correctamente.
+- **Parámetros**: cifrar y descifrar deben usar **mismo \(n\)** y **mismo R**.
 
 ---
 
 ## 12) Consideraciones de seguridad (honestas)
 
-* **KDF débil**: la expansión de bytes es deliberadamente simple para docencia; en producción usar **HKDF/SHA‑256**, **PBKDF2**, **scrypt** o **Argon2**.
-* **Estructura visible**: S‑box cúbica y tweak lineal son fáciles de analizar; no hay pruebas de seguridad formales.
-* **Integridad**: no incluye MAC/AEAD. Un atacante podría alterar bloques sin ser detectado.
-* **Recomendación**: tratar HASCILL como **laboratorio** para entender bloques, no como cifrado de misión crítica.
+- **KDF débil (docente)**: el expansor es intencionalmente simple; en producción usar **Argon2id/scrypt/HKDF**.
+- **Estructura visible**: S-box cúbica y capas lineales con tweaks lineales facilitan análisis con suficientes datos.
+- **Integridad ausente**: no hay MAC/AEAD.
+- **Consejo**: tratar HASCILL como **laboratorio** conceptual. Para protección real: AEAD moderno.
 
 ---
 
 ## 13) Interfaz con el juego (resumen)
 
-* El servidor expone **fases** como tareas: TPW, TMSG, A, B, C, D (por bloque).
-* La validación compara con el resultado correcto y **no avanza** hasta que el vector sea válido.
-* El **tweak** asegura que el vector esperado cambie con el índice de bloque, incluso para mensajes repetidos.
+- El servidor presenta **fases** por bloque y ronda (TPW/TMSG para traducciones, luego A0, y ciclos B/C/D por ronda).
+- La validación no avanza si el vector es incorrecto.
+- El **tweak** hace que los resultados esperados cambien con la **posición del bloque** y la **ronda**.
 
 ---
 
 ## 14) Glosario rápido
 
-* **CBC**: modo en cadena; cada bloque usa el cifrado anterior.
-* **S‑box**: caja de sustitución no lineal; aquí ( x \mapsto x^3 ) mod ( m ).
-* **Tweak**: variación dependiente del índice/bloque que evita repeticiones estructurales.
-* **PKCS#7**: esquema de relleno estándar por longitud.
+- **CBC**: encadenamiento por bloque (usa el resultado previo).
+- **S-box**: sustitución no lineal; aquí \( x \mapsto x^3 \bmod m \).
+- **Tweak**: variación dependiente de índice/ronda que evita repeticiones.
+- **PKCS#7**: padding estándar.
 
 ---
 
@@ -190,6 +176,6 @@ El proyecto se distribuye bajo **MIT License** (ver archivo `LICENSE`).
 
 ## 16) Autoría y aviso de implementación
 
-La **idea general del cifrado de Hill** es pública y ampliamente conocida. **HASCILL**, tal como está definido en este documento (derivación desde ASCII de la contraseña, selección de primo para S‑box cúbica, tweak posicional, pipeline A→B→C→D y el juego educativo "HASCILL — Crypto Race"), junto con su **implementación de software**, ha sido diseñada y desarrollada por **Sebastián Dario Pérez Pantoja**.
+La **idea general del cifrado de Hill** es pública y ampliamente conocida. **HASCILL**, tal como está definido en este documento (derivación desde ASCII de la contraseña, selección de primo para S-box cúbica, **pipeline por rondas** con **configuración base n=4 y R=10**, tweak posicional por bloque y ronda, y el juego educativo "HASCILL — Crypto Race"), junto con su **implementación de software**, ha sido diseñada y desarrollada por **Sebastián Dario Pérez Pantoja**.
 
 © 2025 Sebastián Dario Pérez Pantoja — GitHub: @sebastiand.perez. Implementación publicada bajo **MIT License** (ver `LICENSE`). Si reutilizas el código o el diseño del juego, por favor conserva la atribución.
